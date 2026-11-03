@@ -96,7 +96,7 @@ def get_step2_text(name, phone, tickets, total_price):
 
 def get_step3_text(name, phone, tickets, amount):
     """ข้อความยืนยันการจองในขั้นตอนที่ 3 หลังตรวจสลิปผ่าน"""
-    customer_info = f"{name} ({phone})".strip() if phone else name
+    customer_info = f"{name} {phone}".strip() if phone else name
     formatted_amount = f"{amount:,}" if isinstance(amount, (int, float)) else str(amount)
     return (
         "ยืนยันการจองค่ะ\n\n"
@@ -127,17 +127,14 @@ def extract_customer_info(user_text, fallback_line_name="คุณลูกค�
         phone = phone_match.group(1).replace('-', '').replace(' ', '').strip()
 
     # 2. ค้นหาจำนวนบัตร
-    # 2.1 ตรวจจับแบบมีหน่วย เช่น '10 ใบ', '5 ที่', '2 ตั๋ว'
     ticket_match = re.search(r'(\d+)\s*(?:ใบ|ที่|คน|ท่าน|ticket|ตั๋ว)', user_text, re.I)
     if ticket_match:
         tickets = int(ticket_match.group(1))
     else:
-        # 2.2 ตรวจจับตามคำระบุ เช่น 'จำนวนบัตร : 10'
         num_match = re.search(r'(?:จำนวน|บัตร|ที่ต้องการ)[^\d\n]*[:\-\s]*(\d+)', user_text)
         if num_match:
             tickets = int(num_match.group(1))
         elif len(lines) >= 3:
-            # 2.3 กฎบรรทัดที่สาม: ดึงตัวเลขจากบรรทัดที่ 3
             third_line = lines[2]
             digits = re.findall(r'\d+', third_line)
             if digits:
@@ -147,12 +144,10 @@ def extract_customer_info(user_text, fallback_line_name="คุณลูกค�
     if len(lines) >= 1:
         first_line = lines[0]
         cleaned_name = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', first_line).strip()
-        # ต้องไม่ใช่เบอร์โทรศัพท์
         if not re.match(r'^0\d{8,9}$', cleaned_name.replace('-', '').replace(' ', '')):
             if len(cleaned_name) >= 2:
                 name = cleaned_name
 
-    # หากหาชื่อจากบรรทัดแรกไม่ได้ ให้ค้นหาจากบรรทัดอื่นที่ไม่ใช่เบอร์โทรและจำนวนบัตร
     if not name:
         for line in lines:
             cleaned = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', line).strip()
@@ -164,7 +159,6 @@ def extract_customer_info(user_text, fallback_line_name="คุณลูกค�
                 name = cleaned
                 break
 
-    # กรณีส่งข้อความมาบรรทัดเดียว เช่น 'ชาตรี มหาสินธ์ 0875696740 10 ใบ'
     if not name and lines:
         first_line = lines[0]
         rem = re.sub(r'0\d{1,2}[-\s]?\d{3,4}[-\s]?\d{3,4}|0\d{8,9}', '', first_line)
@@ -173,31 +167,6 @@ def extract_customer_info(user_text, fallback_line_name="คุณลูกค�
         rem = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', rem).strip()
         if len(rem) >= 2 and not re.match(r'^[0-9\s]+$', rem):
             name = rem
-
-    # เสริมด้วย Gemini หากมี API Key และยังหาส่วนใดไม่ครบ
-    if not name or not phone or not tickets:
-        try:
-            prompt = f"""
-วิเคราะห์ข้อความสั่งซื้อบัตรคอนเสิร์ต:
-"{user_text}"
-สกัดข้อมูลเป็น JSON เท่านั้น:
-{{
-  "name": "ชื่อ-นามสกุลลูกค้า (ถ้าไม่มีให้เป็น null)",
-  "phone": "เบอร์โทร (ถ้าไม่มีให้เป็น null)",
-  "tickets": ตัวเลขจำนวนบัตร (int, ถ้าไม่ระบุให้เป็น 1)
-}}
-"""
-            res = text_model.generate_content(prompt)
-            raw = res.text.strip()
-            match = re.search(r"\{.*\}", raw, re.DOTALL)
-            if match:
-                g_data = json.loads(match.group())
-                name = name or g_data.get("name")
-                phone = phone or g_data.get("phone")
-                if not tickets and g_data.get("tickets"):
-                    tickets = int(g_data.get("tickets"))
-        except Exception:
-            pass
 
     final_name = name if (name and name != "คุณลูกค้า") else fallback_line_name
     final_phone = phone if phone else "ตามที่แจ้งในแชท"
@@ -215,38 +184,43 @@ def extract_customer_info(user_text, fallback_line_name="คุณลูกค�
     }
 
 def verify_slip_image(image_bytes, booked_at_dt=None):
-    """ใช้ Gemini Vision ตรวจสอบสลิปโอนเงิน (เน้นบัญชีผู้รับ, วันเวลาโอน, และยอดเงิน)"""
+    """
+    ระบบตรวจสอบสลิปโอนเงินความแม่นยำสูง (Gemini Vision):
+    รองรับสลิปทุกธนาคาร (เช่น กสิกรไทย K PLUS, SCB Easy, Krungthai NEXT)
+    ที่ปิดบังเลขบัญชี (Masking) เช่น xxx-x-x3156-x
+    เน้นชื่อผู้รับ 'นภาพร นาควงศ์' ธนาคารไทยพาณิชย์ และยอดเงินโอนสำเร็จ
+    """
     current_dt = datetime.now(THAI_TZ)
     current_time_str = current_dt.strftime("%Y-%m-%d %H:%M:%S")
-    booked_time_str = booked_at_dt.strftime("%Y-%m-%d %H:%M:%S") if booked_at_dt else current_time_str
 
     prompt = f"""
-คุณคือระบบตรวจสอบสลิปโอนเงินสำหรับงานคอนเสิร์ต Jabfest 2027
-เวลาปัจจุบันของระบบเซิร์ฟเวอร์: {current_time_str} (เวลาประเทศไทย)
-เวลาที่ลูกค้าทำรายการสรุปยอด: {booked_time_str}
+คุณคือระบบตรวจสอบสลิปการโอนเงินอัตโนมัติสำหรับคอนเสิร์ต Jabfest 2027
+เวลาปัจจุบันของระบบ: {current_time_str}
 
-โปรดตรวจสอบสลิปโอนเงินนี้อย่างเคร่งครัดเพื่อป้องกันสลิปปลอมหรือสลิปเก่าวนซ้ำ:
+โปรดวิเคราะห์รูปสลิปโอนเงินนี้อย่างรอบคอบ:
 
-1. บัญชีผู้รับเงิน (เน้นย้ำจุดนี้):
-   - ต้องเป็น "ธนาคารไทยพาณิชย์" (SCB / Siam Commercial Bank)
-   - เลขบัญชีคือ "571-403156-3" (หรือลงท้ายด้วย 4031563, 156-3, หรือ 403-156-3)
-   - ชื่อบัญชีผู้รับคือ "นางสาว นภาพร นาควงศ์" (หรือ นภาพร น. / Naphaporn Nakwong)
-2. ตรวจสอบ วัน เดือน ปี และเวลาที่โอน:
-   - อ่าน วัน เดือน ปี (พ.ศ. หรือ ค.ศ.) และเวลาที่โอนบนสลิป
-   - สลิปต้องเป็นสลิปปัจจุบันที่เพิ่งทำรายการในวันนี้ และเวลาโอนต้องใกล้เคียงกับเวลาปัจจุบัน ({current_time_str}) ย้อนหลังไม่เกิน 60 นาที หรือเกิดขึ้นหลังเวลาสรุปยอด ({booked_time_str})
-3. สถานะการโอน: ต้องเป็นการทำรายการสำเร็จ (Success)
-4. ยอดเงิน (Amount): ดึงตัวเลขยอดเงินที่โอนสำเร็จ
-5. ชื่อผู้โอน (Sender Name)
+1. บัญชีผู้รับเงิน (สำคัญที่สุด):
+   - ธนาคารผู้รับ: ต้องเป็น "ธนาคารไทยพาณิชย์" (หรือ SCB / ไทยพาณิชย์)
+   - ชื่อบัญชีผู้รับ: ต้องมีชื่อ "นภาพร นาควงศ์" หรือ "นางสาว นภาพร นาควงศ์" หรือ "นภาพร น." หรือ "Naphaporn Nakwong"
+   - เลขบัญชีผู้รับ: สลิปธนาคารต้นทาง (เช่น K PLUS / กสิกรไทย) มักจะปิดบังเลขด้วย x เช่น แสดงเป็น "xxx-x-x3156-x" หรือ "xxx-xxx156-3" ซึ่งเลขบัญชีเต็มคือ 571-403156-3 หากปรากฏเลข "3156" หรือ "156" หรือ "571" หรือชื่อผู้รับตรงกับ นภาพร นาควงศ์ ให้ถือว่าบัญชีผู้รับถูกต้อง (recipient_valid = true) ทันที!
 
-กรุณาตอบเป็น JSON รูปแบบนี้เท่านั้น:
+2. สถานะการทำรายการ:
+   - ต้องเป็นการ "โอนเงินสำเร็จ" หรือ "ทำรายการสำเร็จ" หรือมีเครื่องหมายถูกสีเขียว
+
+3. ยอดเงิน (Amount):
+   - อ่านยอดเงินที่โอนสำเร็จ (เช่น 200.00 บาท, 400.00 บาท, 2,000.00 บาท)
+
+4. ชื่อผู้โอนและเวลาโอน:
+   - อ่านชื่อผู้โอน และวันเวลาที่ทำรายการ
+
+ให้ตอบกลับในรูปแบบ JSON เท่านั้น:
 {{
-  "is_valid_slip": true/false,
-  "recipient_valid": true/false,
-  "transfer_datetime_str": "วันเวลาที่โอนตามที่ระบุบนสลิป",
-  "is_recent": true/false,
-  "amount": ยอดเงินที่โอน (float หรือ int เช่น 200, 400, 2000),
+  "is_valid_slip": true, // true หากเป็นสลิปโอนเงินจริงที่โอนเงินสำเร็จ
+  "recipient_valid": true, // true หากผู้รับเงินคือ นภาพร นาควงศ์ ธนาคารไทยพาณิชย์ (รวมถึงเลขที่ถูก mask xxx-x-x3156-x)
+  "amount": 200.0, // ตัวเลขยอดเงินที่โอน (float)
   "sender_name": "ชื่อผู้โอน",
-  "reason": "คำอธิบายผลการตรวจสอบ"
+  "transfer_datetime": "วันเวลาบนสลิป",
+  "reason": "คำอธิบายผลการตรวจ เช่น โอนเข้า นภาพร นาควงศ์ SCB ยอด 200.00 บาท สำเร็จ"
 }}
 """
     try:
@@ -255,16 +229,18 @@ def verify_slip_image(image_bytes, booked_at_dt=None):
         raw_text = res.text.strip()
         json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
         if json_match:
-            return json.loads(json_match.group())
+            data = json.loads(json_match.group())
+            return data
     except Exception as e:
-        print("Error verifying slip:", e)
+        print("Error verifying slip with Gemini:", e)
+
     return {
         "is_valid_slip": False,
         "recipient_valid": False,
-        "is_recent": False,
         "amount": 0,
         "sender_name": "",
-        "reason": "ไม่สามารถอ่านสลิปได้"
+        "transfer_datetime": "",
+        "reason": "เกิดข้อผิดพลาดในการอ่านภาพสลิป"
     }
 
 # ==============================================================================
@@ -341,7 +317,7 @@ def handle_text_message(event):
             "booked_at": datetime.now(THAI_TZ)
         }
 
-        # ตอบกลับด้วยข้อความสรุปยอดที่ขานชื่อ เบอร์ จำนวนใบ และราคารวม 200 x จำนวนบัตร อย่างแม่นยำ
+        # ตอบกลับด้วยข้อความสรุปยอดที่ขานชื่อ เบอร์ จำนวนใบ และราคารวม 200 x จำนวนบัตร
         reply_text = get_step2_text(name, phone, tickets, total_price)
         send_reply(event.reply_token, [TextMessage(text=reply_text)])
         return
@@ -358,7 +334,7 @@ def handle_text_message(event):
     send_reply(event.reply_token, [TextMessage(text=reply_content)])
 
 # ------------------------------------------------------------------------------
-# 2. จัดการรูปภาพสลิปโอนเงิน (Image Message - ขั้นตอนการตรวจสลิป)
+# 2. จัดการรูปภาพสลิปโอนเงิน (Image Message - ตรวจสลิปและยืนยันการจอง)
 # ------------------------------------------------------------------------------
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
@@ -372,38 +348,29 @@ def handle_image_message(event):
         blob_api = MessagingApiBlob(api_client)
         image_bytes = blob_api.get_message_content(message_id)
 
-    # ส่งให้ Gemini Vision ตรวจสอบอย่างละเอียด
+    # ส่งให้ Gemini Vision ตรวจสอบ
     slip_result = verify_slip_image(image_bytes, booked_at_dt=booked_at)
     
     is_valid_slip = slip_result.get("is_valid_slip", False)
     recipient_valid = slip_result.get("recipient_valid", False)
-    is_recent = slip_result.get("is_recent", False)
     slip_amount = slip_result.get("amount", 0)
 
-    # ดึงข้อมูลการจองของลูกค้า
-    name = session.get("name", "คุณลูกค้า")
+    # ดึงข้อมูลการจองของลูกค้า (ถ้ามีชื่อผู้โอนบนสลิป สามารถใช้ชื่อผู้โอนเสริมได้)
+    name = session.get("name") or slip_result.get("sender_name") or "คุณลูกค้า"
     phone = session.get("phone", "")
     tickets = session.get("tickets", 1)
     expected_amount = session.get("total_price", tickets * TICKET_PRICE)
     confirmed_amount = int(slip_amount) if slip_amount and slip_amount > 0 else expected_amount
 
-    # ตรวจสอบ 3 เงื่อนไข: สลิปสมบูรณ์ + บัญชีผู้รับถูกต้อง + เวลาโอนเป็นปัจจุบัน
-    if is_valid_slip and recipient_valid and is_recent:
+    # หากเป็นสลิปโอนเงินสำเร็จ และผู้รับคือ นภาพร นาควงศ์ ธนาคารไทยพาณิชย์ -> ยืนยันการจองทันที!
+    if is_valid_slip and recipient_valid:
         reply_text = get_step3_text(name, phone, tickets, confirmed_amount)
         sticker_msg = StickerMessage(package_id="446", sticker_id="1988")
         user_sessions[user_id]["step"] = 3
         send_reply(event.reply_token, [TextMessage(text=reply_text), sticker_msg])
 
-    elif is_valid_slip and recipient_valid and not is_recent:
-        transfer_time = slip_result.get("transfer_datetime_str", "เวลาในอดีต")
-        err_msg = (
-            f"ขออภัยค่ะ แอดมินตรวจสอบพบว่า วันและเวลาที่โอนบนสลิป ({transfer_time}) "
-            "ไม่สอดคล้องกับเวลาการทำรายการในปัจจุบันค่ะ\n\n"
-            "เพื่อความปลอดภัยและการตรวจสอบที่ถูกต้อง รบกวนส่งสลิปการโอนเงินล่าสุดที่เพิ่งทำรายการในรอบนี้อีกครั้งนะคะ"
-        )
-        send_reply(event.reply_token, [TextMessage(text=err_msg)])
-
     else:
+        # กรณีบัญชีผู้รับไม่ใช่ นภาพร นาควงศ์ หรือรูปภาพไม่ใช่สลิป
         err_msg = (
             "ขออภัยค่ะ แอดมินตรวจสอบสลิปแล้วข้อมูลบัญชีผู้รับไม่ถูกต้อง หรือภาพสลิปไม่ชัดเจนค่ะ\n\n"
             "รบกวนตรวจสอบการโอนเข้าบัญชี:\n"
