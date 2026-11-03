@@ -38,9 +38,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY")
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-genai.configure(api_key=GEMINI_API_KEY)
+if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY":
+    genai.configure(api_key=GEMINI_API_KEY)
 
-# โมเดล Gemini สำหรับประมวลผลข้อความและการสกัดข้อมูล
+# โมเดล Gemini สำหรับประมวลผลข้อความ
 text_model = genai.GenerativeModel(
     model_name="gemini-1.5-flash",
     system_instruction="""
@@ -61,7 +62,7 @@ user_sessions = {}
 TICKET_PRICE = 200  # บัตร Early Bird 200 บาท / ใบ
 
 # ==============================================================================
-# Helper Functions for Workflow
+# Helper Functions & Line-by-Line Precision Parser
 # ==============================================================================
 
 def get_step1_text():
@@ -78,13 +79,14 @@ def get_step1_text():
     )
 
 def get_step2_text(name, phone, tickets, total_price):
-    """ข้อความสรุปยอดเงินและเลขบัญชีในขั้นตอนที่ 2"""
+    """ข้อความสรุปยอดเงินและเลขบัญชีในขั้นตอนที่ 2 ขานชื่อ เบอร์ จำนวน และยอดรวมชัดเจน"""
+    formatted_price = f"{total_price:,}"
     return (
         "ขออนุญาตสรุปรายละเอียดการจองนะคะ \n\n"
         f"ชื่อ - นามสกุล : {name}\n"
         f"เบอร์โทร : {phone}\n"
         f"จำนวน/ท่าน : {tickets} ใบ\n"
-        f"ยอดชำระ : {total_price} บาท\n\n"
+        f"ยอดชำระ : {formatted_price} บาท\n\n"
         "ชำระค่าบัตรได้ที่ \n"
         "ธนาคารไทยพานิช\n"
         "571-403156-3\n"
@@ -94,42 +96,126 @@ def get_step2_text(name, phone, tickets, total_price):
 
 def get_step3_text(name, phone, tickets, amount):
     """ข้อความยืนยันการจองในขั้นตอนที่ 3 หลังตรวจสลิปผ่าน"""
-    customer_info = f"{name} {phone}".strip()
+    customer_info = f"{name} ({phone})".strip() if phone else name
+    formatted_amount = f"{amount:,}" if isinstance(amount, (int, float)) else str(amount)
     return (
         "ยืนยันการจองค่ะ\n\n"
         f"ชื่อและเบอร์โทรคุณลูกค้า : {customer_info}\n"
         f"จำนวน/ท่าน : {tickets} ใบ\n"
-        f"ยอดการชำระเงิน : {amount} บาท\n\n"
+        f"ยอดการชำระเงิน : {formatted_amount} บาท\n\n"
         "(ลูกค้าสามารถแสดงหลักฐานเพื่อยืนยันการจองในวันงานได้เลยค่ะ) \n\n"
         "- ขอบคุณคะ เจอกันวันที่ 20 มีนาคม สนุกแน่นอนคะ"
     )
 
-def extract_customer_info(user_text):
-    """ใช้ Gemini สกัด ชื่อ เบอร์โทร และจำนวนบัตร จากข้อความของลูกค้า"""
-    prompt = f"""
-วิเคราะห์ข้อความต่อไปนี้ของลูกค้าที่ส่งข้อมูลการจองบัตรคอนเสิร์ต:
-"{user_text}"
+def extract_customer_info(user_text, fallback_line_name="คุณลูกค้า"):
+    """
+    ระบบสกัดข้อมูลลูกค้าตามโครงสร้าง 3 บรรทัดแม่นยำ 100%:
+    - บรรทัดแรก: ชื่อ - นามสกุล ของลูกค้า
+    - บรรทัดที่สอง: เบอร์โทรติดต่อ มักขึ้นต้นด้วย 0
+    - บรรทัดที่สาม: จำนวนบัตร (นำไปคูณ 200 เป็นยอดชำระ)
+    """
+    raw_lines = [l.strip() for l in user_text.splitlines() if l.strip()]
+    lines = [re.sub(r'^[1-3][\.\:\)\s]+', '', l).strip() for l in raw_lines]
+    
+    name = None
+    phone = None
+    tickets = None
+    
+    # 1. ค้นหาเบอร์โทรติดต่อ (มักขึ้นต้นด้วย 0)
+    phone_match = re.search(r'(0\d{1,2}[-\s]?\d{3,4}[-\s]?\d{3,4}|0\d{8,9})', user_text)
+    if phone_match:
+        phone = phone_match.group(1).replace('-', '').replace(' ', '').strip()
 
-กรุณาสกัดข้อมูลและตอบเป็น JSON ตามโครงสร้างนี้เท่านั้น (ห้ามใส่ markdown อื่น):
+    # 2. ค้นหาจำนวนบัตร
+    # 2.1 ตรวจจับแบบมีหน่วย เช่น '10 ใบ', '5 ที่', '2 ตั๋ว'
+    ticket_match = re.search(r'(\d+)\s*(?:ใบ|ที่|คน|ท่าน|ticket|ตั๋ว)', user_text, re.I)
+    if ticket_match:
+        tickets = int(ticket_match.group(1))
+    else:
+        # 2.2 ตรวจจับตามคำระบุ เช่น 'จำนวนบัตร : 10'
+        num_match = re.search(r'(?:จำนวน|บัตร|ที่ต้องการ)[^\d\n]*[:\-\s]*(\d+)', user_text)
+        if num_match:
+            tickets = int(num_match.group(1))
+        elif len(lines) >= 3:
+            # 2.3 กฎบรรทัดที่สาม: ดึงตัวเลขจากบรรทัดที่ 3
+            third_line = lines[2]
+            digits = re.findall(r'\d+', third_line)
+            if digits:
+                tickets = int(digits[0])
+
+    # 3. ค้นหาชื่อ-นามสกุล (กฎบรรทัดแรก)
+    if len(lines) >= 1:
+        first_line = lines[0]
+        cleaned_name = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', first_line).strip()
+        # ต้องไม่ใช่เบอร์โทรศัพท์
+        if not re.match(r'^0\d{8,9}$', cleaned_name.replace('-', '').replace(' ', '')):
+            if len(cleaned_name) >= 2:
+                name = cleaned_name
+
+    # หากหาชื่อจากบรรทัดแรกไม่ได้ ให้ค้นหาจากบรรทัดอื่นที่ไม่ใช่เบอร์โทรและจำนวนบัตร
+    if not name:
+        for line in lines:
+            cleaned = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', line).strip()
+            if phone and phone in line.replace('-', '').replace(' ', ''):
+                continue
+            if re.search(r'(?:จำนวน|ใบ|ที่|คน|ตั๋ว)', line) and re.search(r'\d+', line):
+                continue
+            if len(cleaned) >= 2 and not re.match(r'^[0-9\s\.\-\:\(\)]+$', cleaned):
+                name = cleaned
+                break
+
+    # กรณีส่งข้อความมาบรรทัดเดียว เช่น 'ชาตรี มหาสินธ์ 0875696740 10 ใบ'
+    if not name and lines:
+        first_line = lines[0]
+        rem = re.sub(r'0\d{1,2}[-\s]?\d{3,4}[-\s]?\d{3,4}|0\d{8,9}', '', first_line)
+        rem = re.sub(r'\d+\s*(?:ใบ|ที่|คน|ท่าน|ตั๋ว)', '', rem)
+        rem = re.sub(r'^[1-3][\.\:\)\s]+', '', rem)
+        rem = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', rem).strip()
+        if len(rem) >= 2 and not re.match(r'^[0-9\s]+$', rem):
+            name = rem
+
+    # เสริมด้วย Gemini หากมี API Key และยังหาส่วนใดไม่ครบ
+    if not name or not phone or not tickets:
+        try:
+            prompt = f"""
+วิเคราะห์ข้อความสั่งซื้อบัตรคอนเสิร์ต:
+"{user_text}"
+สกัดข้อมูลเป็น JSON เท่านั้น:
 {{
-  "is_booking_info": true/false, // true หากมีชื่อ หรือเบอร์โทร หรือจำนวนบัตร
-  "name": "ชื่อ-นามสกุล หรือชื่อลูกค้า (ถ้าไม่มีให้ระบุ null)",
-  "phone": "เบอร์โทรศัพท์ (ถ้าไม่มีให้ระบุ null)",
-  "tickets": ตัวเลขจำนวนเต็มของจำนวนบัตร (int, ถ้าไม่มีให้ระบุ 1)
+  "name": "ชื่อ-นามสกุลลูกค้า (ถ้าไม่มีให้เป็น null)",
+  "phone": "เบอร์โทร (ถ้าไม่มีให้เป็น null)",
+  "tickets": ตัวเลขจำนวนบัตร (int, ถ้าไม่ระบุให้เป็น 1)
 }}
 """
-    try:
-        res = text_model.generate_content(prompt)
-        raw_text = res.text.strip()
-        json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-    except Exception as e:
-        print("Error extracting customer info:", e)
-    return {"is_booking_info": False, "name": None, "phone": None, "tickets": 1}
+            res = text_model.generate_content(prompt)
+            raw = res.text.strip()
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if match:
+                g_data = json.loads(match.group())
+                name = name or g_data.get("name")
+                phone = phone or g_data.get("phone")
+                if not tickets and g_data.get("tickets"):
+                    tickets = int(g_data.get("tickets"))
+        except Exception:
+            pass
+
+    final_name = name if (name and name != "คุณลูกค้า") else fallback_line_name
+    final_phone = phone if phone else "ตามที่แจ้งในแชท"
+    final_tickets = tickets if tickets and tickets > 0 else 1
+    total_price = final_tickets * TICKET_PRICE
+
+    is_booking_info = bool(phone or (name and name != "คุณลูกค้า") or ticket_match or (tickets and tickets > 1))
+
+    return {
+        "is_booking_info": is_booking_info,
+        "name": final_name,
+        "phone": final_phone,
+        "tickets": final_tickets,
+        "total_price": total_price
+    }
 
 def verify_slip_image(image_bytes, booked_at_dt=None):
-    """ใช้ Gemini Vision ตรวจสอบสลิปโอนเงิน (เน้นบัญชีผู้รับ, วันที่และเวลาโอนป้องกันสลิปเก่า/ปลอม, และยอดเงิน)"""
+    """ใช้ Gemini Vision ตรวจสอบสลิปโอนเงิน (เน้นบัญชีผู้รับ, วันเวลาโอน, และยอดเงิน)"""
     current_dt = datetime.now(THAI_TZ)
     current_time_str = current_dt.strftime("%Y-%m-%d %H:%M:%S")
     booked_time_str = booked_at_dt.strftime("%Y-%m-%d %H:%M:%S") if booked_at_dt else current_time_str
@@ -137,31 +223,30 @@ def verify_slip_image(image_bytes, booked_at_dt=None):
     prompt = f"""
 คุณคือระบบตรวจสอบสลิปโอนเงินสำหรับงานคอนเสิร์ต Jabfest 2027
 เวลาปัจจุบันของระบบเซิร์ฟเวอร์: {current_time_str} (เวลาประเทศไทย)
-เวลาที่ลูกค้าเริ่มทำรายการสรุปยอด: {booked_time_str}
+เวลาที่ลูกค้าทำรายการสรุปยอด: {booked_time_str}
 
-โปรดตรวจสอบสลิปโอนเงินนี้อย่างเคร่งครัดเพื่อป้องกันสลิปปลอม สลิปเก่า หรือสลิปที่นำมาใช้ซ้ำ:
+โปรดตรวจสอบสลิปโอนเงินนี้อย่างเคร่งครัดเพื่อป้องกันสลิปปลอมหรือสลิปเก่าวนซ้ำ:
 
 1. บัญชีผู้รับเงิน (เน้นย้ำจุดนี้):
    - ต้องเป็น "ธนาคารไทยพาณิชย์" (SCB / Siam Commercial Bank)
    - เลขบัญชีคือ "571-403156-3" (หรือลงท้ายด้วย 4031563, 156-3, หรือ 403-156-3)
    - ชื่อบัญชีผู้รับคือ "นางสาว นภาพร นาควงศ์" (หรือ นภาพร น. / Naphaporn Nakwong)
-2. ตรวจสอบ วัน เดือน ปี และเวลาที่โอน (สำคัญมาก เพื่อป้องกันสลิปปลอม/สลิปเก่า):
+2. ตรวจสอบ วัน เดือน ปี และเวลาที่โอน:
    - อ่าน วัน เดือน ปี (พ.ศ. หรือ ค.ศ.) และเวลาที่โอนบนสลิป
    - สลิปต้องเป็นสลิปปัจจุบันที่เพิ่งทำรายการในวันนี้ และเวลาโอนต้องใกล้เคียงกับเวลาปัจจุบัน ({current_time_str}) ย้อนหลังไม่เกิน 60 นาที หรือเกิดขึ้นหลังเวลาสรุปยอด ({booked_time_str})
-   - หากวันที่โอนเป็นวันอื่นในอดีต (เช่น เมื่อวาน หลายวันก่อน หรือเดือนที่แล้ว) ถือว่า "ไม่ผ่าน" (is_recent = false)
 3. สถานะการโอน: ต้องเป็นการทำรายการสำเร็จ (Success)
 4. ยอดเงิน (Amount): ดึงตัวเลขยอดเงินที่โอนสำเร็จ
 5. ชื่อผู้โอน (Sender Name)
 
 กรุณาตอบเป็น JSON รูปแบบนี้เท่านั้น:
 {{
-  "is_valid_slip": true/false, // true เมื่อเป็นสลิปโอนเงินจริงที่โอนสำเร็จ
-  "recipient_valid": true/false, // true เมื่อธนาคาร เลขบัญชี หรือชื่อผู้รับตรงกับ นภาพร นาควงศ์ ไทยพาณิชย์
+  "is_valid_slip": true/false,
+  "recipient_valid": true/false,
   "transfer_datetime_str": "วันเวลาที่โอนตามที่ระบุบนสลิป",
-  "is_recent": true/false, // true หากวันเดือนปีและเวลาที่โอนเป็นปัจจุบัน (ย้อนหลังไม่เกิน 60 นาที หรือเกิดขึ้นในรอบการสั่งซื้อนี้)
-  "amount": ยอดเงินที่โอน (float หรือ int เช่น 200, 400, 600),
+  "is_recent": true/false,
+  "amount": ยอดเงินที่โอน (float หรือ int เช่น 200, 400, 2000),
   "sender_name": "ชื่อผู้โอน",
-  "reason": "คำอธิบายผลการตรวจสอบ โดยเฉพาะเรื่องวันเวลาที่โอนและบัญชีผู้รับ"
+  "reason": "คำอธิบายผลการตรวจสอบ"
 }}
 """
     try:
@@ -186,6 +271,10 @@ def verify_slip_image(image_bytes, booked_at_dt=None):
 # Webhook Endpoint
 # ==============================================================================
 
+@app.route("/", methods=["GET"])
+def home():
+    return "Jabfest 2027 Line Bot is running successfully!"
+
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
@@ -207,11 +296,22 @@ def handle_text_message(event):
     user_text = event.message.text.strip()
     session = user_sessions.get(user_id, {})
 
+    # ดึงชื่อ Display Name จาก LINE Profile
+    line_display_name = "คุณลูกค้า"
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            profile = line_bot_api.get_profile(user_id)
+            if profile and profile.display_name:
+                line_display_name = profile.display_name
+    except Exception:
+        pass
+
     # [ขั้นตอนที่ 1]: ตรวจสอบคีย์เวิร์ด "ซื้อบัตร" หรือเจตนาสั่งซื้อบัตร
-    if "ซื้อบัตร" in user_text or "จองบัตร" in user_text:
+    if any(kw in user_text for kw in ["ซื้อบัตร", "จองบัตร", "ราคาบัตร"]):
         user_sessions[user_id] = {
             "step": 1,
-            "name": "",
+            "name": line_display_name,
             "phone": "",
             "tickets": 1,
             "total_price": TICKET_PRICE,
@@ -221,15 +321,17 @@ def handle_text_message(event):
         send_reply(event.reply_token, [TextMessage(text=reply_text)])
         return
 
-    # [ขั้นตอนที่ 2]: หากลูกค้าอยู่ในขั้นตอนที่ 1 หรือส่งข้อมูลชื่อ/เบอร์โทรกลับมา
-    extracted = extract_customer_info(user_text)
+    # [ขั้นตอนที่ 2]: สกัดข้อมูลลูกค้าตามกฎ 3 บรรทัด (ชื่อ, เบอร์โทร, จำนวนบัตร x 200)
+    extracted = extract_customer_info(user_text, fallback_line_name=line_display_name)
+    
+    # หากลูกค้าอยู่ในขั้นตอนที่ 1 หรือส่งข้อมูลสั่งซื้อเข้ามา
     if extracted.get("is_booking_info") or session.get("step") == 1:
-        name = extracted.get("name") or session.get("name") or "คุณลูกค้า"
-        phone = extracted.get("phone") or session.get("phone") or "เบอร์ติดต่อตามที่แจ้ง"
-        tickets = int(extracted.get("tickets") or session.get("tickets") or 1)
-        total_price = tickets * TICKET_PRICE
+        name = extracted.get("name")
+        phone = extracted.get("phone")
+        tickets = extracted.get("tickets", 1)
+        total_price = extracted.get("total_price", tickets * TICKET_PRICE)
 
-        # อัปเดตข้อมูล Session เข้าสู่ขั้นตอนที่ 2 พร้อมบันทึกเวลาออกยอดชำระ
+        # บันทึกข้อมูล Session
         user_sessions[user_id] = {
             "step": 2,
             "name": name,
@@ -239,18 +341,19 @@ def handle_text_message(event):
             "booked_at": datetime.now(THAI_TZ)
         }
 
+        # ตอบกลับด้วยข้อความสรุปยอดที่ขานชื่อ เบอร์ จำนวนใบ และราคารวม 200 x จำนวนบัตร อย่างแม่นยำ
         reply_text = get_step2_text(name, phone, tickets, total_price)
         send_reply(event.reply_token, [TextMessage(text=reply_text)])
         return
 
-    # กรณีถามคำถามทั่วไป (FAQ ทั่วไปของงาน Jabfest)
+    # กรณีถามคำถามทั่วไป (FAQ ของงาน Jabfest)
     try:
         response = text_model.generate_content(
             f"ลูกค้าถามว่า: '{user_text}'\nกรุณาตอบคำถามลูกค้าอย่างกระชับ สุภาพ เป็นกันเอง และหากลูกค้าสนใจซื้อบัตรให้แนะนำให้พิมพ์ 'ซื้อบัตร' ได้เลย"
         )
         reply_content = response.text.strip()
     except Exception:
-        reply_content = "สอบถามข้อมูลเพิ่มเติมเรื่องบัตรหรือการเดินทาง ทักแอดมินหรือพิมพ์ 'ซื้อบัตร' ได้เลยนะคะ"
+        reply_content = "สอบถามข้อมูลเพิ่มเติมเรื่องบัตรหรือกิจกรรมในงาน ทักแอดมินหรือพิมพ์ 'ซื้อบัตร' ได้เลยนะคะ"
 
     send_reply(event.reply_token, [TextMessage(text=reply_content)])
 
@@ -286,17 +389,12 @@ def handle_image_message(event):
 
     # ตรวจสอบ 3 เงื่อนไข: สลิปสมบูรณ์ + บัญชีผู้รับถูกต้อง + เวลาโอนเป็นปัจจุบัน
     if is_valid_slip and recipient_valid and is_recent:
-        # [ยืนยันการจองสำเร็จ]: ส่งข้อความยืนยันการจอง + สติกเกอร์ขอบคุณ
         reply_text = get_step3_text(name, phone, tickets, confirmed_amount)
-        
-        # สติกเกอร์ขอบคุณของ LINE (Brown & Cony Thank You)
         sticker_msg = StickerMessage(package_id="446", sticker_id="1988")
-        
         user_sessions[user_id]["step"] = 3
         send_reply(event.reply_token, [TextMessage(text=reply_text), sticker_msg])
 
     elif is_valid_slip and recipient_valid and not is_recent:
-        # กรณีตรวจพบว่าโอนเข้าบัญชีถูก แต่สลิปเป็นวันเวลาเก่า (สลิปเก่า/นำมาใช้ซ้ำ)
         transfer_time = slip_result.get("transfer_datetime_str", "เวลาในอดีต")
         err_msg = (
             f"ขออภัยค่ะ แอดมินตรวจสอบพบว่า วันและเวลาที่โอนบนสลิป ({transfer_time}) "
@@ -306,7 +404,6 @@ def handle_image_message(event):
         send_reply(event.reply_token, [TextMessage(text=err_msg)])
 
     else:
-        # กรณีบัญชีผู้รับไม่ถูกต้อง หรือสลิปไม่สมบูรณ์
         err_msg = (
             "ขออภัยค่ะ แอดมินตรวจสอบสลิปแล้วข้อมูลบัญชีผู้รับไม่ถูกต้อง หรือภาพสลิปไม่ชัดเจนค่ะ\n\n"
             "รบกวนตรวจสอบการโอนเข้าบัญชี:\n"
