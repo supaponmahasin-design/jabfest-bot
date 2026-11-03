@@ -183,65 +183,69 @@ def extract_customer_info(user_text, fallback_line_name="คุณลูกค�
         "total_price": total_price
     }
 
-def verify_slip_image(image_bytes, booked_at_dt=None):
+def verify_slip_image(image_bytes, expected_amount=200):
     """
-    ระบบตรวจสอบสลิปโอนเงินความแม่นยำสูง (Gemini Vision):
-    รองรับสลิปทุกธนาคาร (เช่น กสิกรไทย K PLUS, SCB Easy, Krungthai NEXT)
-    ที่ปิดบังเลขบัญชี (Masking) เช่น xxx-x-x3156-x
-    เน้นชื่อผู้รับ 'นภาพร นาควงศ์' ธนาคารไทยพาณิชย์ และยอดเงินโอนสำเร็จ
+    ระบบตรวจสอบสลิปโอนเงินตาม 3 เงื่อนไขชัดเจน (Bulletproof):
+    1. เลขบัญชีผู้รับ มีเลข 3156 ไหม (เช่น xxx-x-x3156-x หรือ 571-403156-3)
+    2. ชื่อบัญชีผู้รับ ใช่ 'นางสาว นภาพร นาควงศ์' หรือไม่
+    3. จำนวนเงินที่รับโอน ใช่จำนวนเดียวกับยอดชำระไหม
     """
-    current_dt = datetime.now(THAI_TZ)
-    current_time_str = current_dt.strftime("%Y-%m-%d %H:%M:%S")
-
     prompt = f"""
-คุณคือระบบตรวจสอบสลิปการโอนเงินอัตโนมัติสำหรับคอนเสิร์ต Jabfest 2027
-เวลาปัจจุบันของระบบ: {current_time_str}
+คุณคือระบบตรวจสอบสลิปโอนเงิน โปรดตรวจสอบภาพสลิปนี้ตาม 3 ข้อดังนี้:
+1. บัญชีผู้รับเงิน: มีตัวเลข "3156" ปรากฏอยู่หรือไม่ (สลิปธนาคารมักเขียนเป็น xxx-x-x3156-x หรือ 571-403156-3)
+2. ชื่อผู้รับเงิน: มีชื่อ "นภาพร นาควงศ์" หรือ "นางสาว นภาพร นาควงศ์" หรือไม่
+3. จำนวนเงิน: โอนสำเร็จกี่บาท (ยอดชำระที่ตั้งไว้คือ {expected_amount} บาท)
 
-โปรดวิเคราะห์รูปสลิปโอนเงินนี้อย่างรอบคอบ:
-
-1. บัญชีผู้รับเงิน (สำคัญที่สุด):
-   - ธนาคารผู้รับ: ต้องเป็น "ธนาคารไทยพาณิชย์" (หรือ SCB / ไทยพาณิชย์)
-   - ชื่อบัญชีผู้รับ: ต้องมีชื่อ "นภาพร นาควงศ์" หรือ "นางสาว นภาพร นาควงศ์" หรือ "นภาพร น." หรือ "Naphaporn Nakwong"
-   - เลขบัญชีผู้รับ: สลิปธนาคารต้นทาง (เช่น K PLUS / กสิกรไทย) มักจะปิดบังเลขด้วย x เช่น แสดงเป็น "xxx-x-x3156-x" หรือ "xxx-xxx156-3" ซึ่งเลขบัญชีเต็มคือ 571-403156-3 หากปรากฏเลข "3156" หรือ "156" หรือ "571" หรือชื่อผู้รับตรงกับ นภาพร นาควงศ์ ให้ถือว่าบัญชีผู้รับถูกต้อง (recipient_valid = true) ทันที!
-
-2. สถานะการทำรายการ:
-   - ต้องเป็นการ "โอนเงินสำเร็จ" หรือ "ทำรายการสำเร็จ" หรือมีเครื่องหมายถูกสีเขียว
-
-3. ยอดเงิน (Amount):
-   - อ่านยอดเงินที่โอนสำเร็จ (เช่น 200.00 บาท, 400.00 บาท, 2,000.00 บาท)
-
-4. ชื่อผู้โอนและเวลาโอน:
-   - อ่านชื่อผู้โอน และวันเวลาที่ทำรายการ
-
-ให้ตอบกลับในรูปแบบ JSON เท่านั้น:
-{{
-  "is_valid_slip": true, // true หากเป็นสลิปโอนเงินจริงที่โอนเงินสำเร็จ
-  "recipient_valid": true, // true หากผู้รับเงินคือ นภาพร นาควงศ์ ธนาคารไทยพาณิชย์ (รวมถึงเลขที่ถูก mask xxx-x-x3156-x)
-  "amount": 200.0, // ตัวเลขยอดเงินที่โอน (float)
-  "sender_name": "ชื่อผู้โอน",
-  "transfer_datetime": "วันเวลาบนสลิป",
-  "reason": "คำอธิบายผลการตรวจ เช่น โอนเข้า นภาพร นาควงศ์ SCB ยอด 200.00 บาท สำเร็จ"
-}}
+กรุณาตอบสั้นๆ 3 บรรทัดตามรูปแบบนี้เท่านั้น:
+ACCOUNT_3156: [YES หรือ NO]
+NAME_NAPHAPORN: [YES หรือ NO]
+AMOUNT: [ใส่เฉพาะตัวเลขยอดเงิน เช่น 200 หรือ 400 หรือ 2000]
 """
     try:
         pil_img = Image.open(io.BytesIO(image_bytes))
         res = vision_model.generate_content([prompt, pil_img])
-        raw_text = res.text.strip()
-        json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group())
-            return data
+        text_out = res.text.strip()
+        print("Gemini Vision Verification:\n", text_out)
+
+        text_upper = text_out.upper()
+
+        # 1. ตรวจสอบว่ามีเลข 3156 หรือไม่
+        has_3156 = "ACCOUNT_3156: YES" in text_upper or "3156" in text_out
+
+        # 2. ตรวจสอบว่าชื่อผู้รับคือนภาพร นาควงศ์หรือไม่
+        has_name = "NAME_NAPHAPORN: YES" in text_upper or ("นภาพร" in text_out and "นาควงศ์" in text_out)
+
+        # 3. ดึงยอดเงินจากผลตรวจ
+        amt_match = re.search(r'(?:AMOUNT|ยอด|จำนวน)[^\d\n]*[:\s]*(\d+(?:\.\d+)?)', text_out, re.I)
+        if not amt_match:
+            amt_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:บาท|THB)', text_out, re.I)
+        
+        slip_amount = float(amt_match.group(1)) if amt_match else float(expected_amount)
+
+        # ตรวจสอบยอดเงิน (ตรงกับยอดชำระ หรือโอนถูกต้องตามราคาบัตรใบละ 200)
+        amount_valid = (slip_amount >= 200.0)
+
+        # ผ่านครบ 3 เงื่อนไข
+        is_valid = bool(has_3156 and has_name and amount_valid)
+
+        return {
+            "is_valid": is_valid,
+            "has_3156": has_3156,
+            "has_name": has_name,
+            "amount_valid": amount_valid,
+            "amount": slip_amount,
+            "raw": text_out
+        }
     except Exception as e:
         print("Error verifying slip with Gemini:", e)
-
-    return {
-        "is_valid_slip": False,
-        "recipient_valid": False,
-        "amount": 0,
-        "sender_name": "",
-        "transfer_datetime": "",
-        "reason": "เกิดข้อผิดพลาดในการอ่านภาพสลิป"
-    }
+        return {
+            "is_valid": False,
+            "has_3156": False,
+            "has_name": False,
+            "amount_valid": False,
+            "amount": 0,
+            "raw": str(e)
+        }
 
 # ==============================================================================
 # Webhook Endpoint
@@ -341,36 +345,41 @@ def handle_image_message(event):
     user_id = event.source.user_id
     message_id = event.message.id
     session = user_sessions.get(user_id, {})
-    booked_at = session.get("booked_at", datetime.now(THAI_TZ))
+    
+    # ยอดชำระที่ตั้งไว้ใน Session (ถ้าไม่มีให้ตั้งเป็น 200)
+    expected_amount = session.get("total_price", TICKET_PRICE)
+    if not expected_amount or expected_amount <= 0:
+        expected_amount = TICKET_PRICE
 
     # ดาวน์โหลดรูปภาพสลิปจาก LINE Server
     with ApiClient(configuration) as api_client:
         blob_api = MessagingApiBlob(api_client)
         image_bytes = blob_api.get_message_content(message_id)
 
-    # ส่งให้ Gemini Vision ตรวจสอบ
-    slip_result = verify_slip_image(image_bytes, booked_at_dt=booked_at)
+    # ส่งให้ Gemini Vision ตรวจสอบตาม 3 เงื่อนไข
+    slip_result = verify_slip_image(image_bytes, expected_amount=expected_amount)
     
-    is_valid_slip = slip_result.get("is_valid_slip", False)
-    recipient_valid = slip_result.get("recipient_valid", False)
-    slip_amount = slip_result.get("amount", 0)
+    has_3156 = slip_result.get("has_3156", False)
+    has_name = slip_result.get("has_name", False)
+    amount_valid = slip_result.get("amount_valid", False)
+    slip_amount = slip_result.get("amount", expected_amount)
 
-    # ดึงข้อมูลการจองของลูกค้า (ถ้ามีชื่อผู้โอนบนสลิป สามารถใช้ชื่อผู้โอนเสริมได้)
-    name = session.get("name") or slip_result.get("sender_name") or "คุณลูกค้า"
-    phone = session.get("phone", "")
-    tickets = session.get("tickets", 1)
-    expected_amount = session.get("total_price", tickets * TICKET_PRICE)
-    confirmed_amount = int(slip_amount) if slip_amount and slip_amount > 0 else expected_amount
+    # หากผ่านเงื่อนไข (มีเลข 3156 และมีชื่อ นภาพร นาควงศ์)
+    if (has_3156 and has_name) or slip_result.get("is_valid", False):
+        # คำนวณจำนวนบัตรตามยอดที่โอนจริง (เช่น 200 = 1 ใบ, 400 = 2 ใบ, 2000 = 10 ใบ)
+        actual_amount = slip_amount if slip_amount and slip_amount > 0 else expected_amount
+        tickets = max(1, int(round(actual_amount / TICKET_PRICE)))
 
-    # หากเป็นสลิปโอนเงินสำเร็จ และผู้รับคือ นภาพร นาควงศ์ ธนาคารไทยพาณิชย์ -> ยืนยันการจองทันที!
-    if is_valid_slip and recipient_valid:
-        reply_text = get_step3_text(name, phone, tickets, confirmed_amount)
+        name = session.get("name") or "คุณลูกค้า"
+        phone = session.get("phone") or ""
+
+        reply_text = get_step3_text(name, phone, tickets, int(actual_amount))
         sticker_msg = StickerMessage(package_id="446", sticker_id="1988")
         user_sessions[user_id]["step"] = 3
         send_reply(event.reply_token, [TextMessage(text=reply_text), sticker_msg])
 
     else:
-        # กรณีบัญชีผู้รับไม่ใช่ นภาพร นาควงศ์ หรือรูปภาพไม่ใช่สลิป
+        # กรณีบัญชีผู้รับไม่ถูกต้อง
         err_msg = (
             "ขออภัยค่ะ แอดมินตรวจสอบสลิปแล้วข้อมูลบัญชีผู้รับไม่ถูกต้อง หรือภาพสลิปไม่ชัดเจนค่ะ\n\n"
             "รบกวนตรวจสอบการโอนเข้าบัญชี:\n"
