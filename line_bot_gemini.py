@@ -107,144 +107,118 @@ def get_step3_text(name, phone, tickets, amount):
         "- ขอบคุณคะ เจอกันวันที่ 20 มีนาคม สนุกแน่นอนคะ"
     )
 
-def extract_customer_info(user_text, fallback_line_name="คุณลูกค้า"):
+def extract_partial_booking_info(user_text):
     """
-    ระบบสกัดข้อมูลลูกค้าตามโครงสร้าง 3 บรรทัดแม่นยำ 100%:
-    - บรรทัดแรก: ชื่อ - นามสกุล ของลูกค้า
-    - บรรทัดที่สอง: เบอร์โทรติดต่อ มักขึ้นต้นด้วย 0
-    - บรรทัดที่สาม: จำนวนบัตร (นำไปคูณ 200 เป็นยอดชำระ)
+    สกัดข้อมูลการจองแต่ละส่วน (ชื่อ, เบอร์โทร, จำนวนบัตร) จากข้อความ
+    รองรับทั้งพิมพ์มาพร้อมกัน 3 บรรทัด หรือทยอยพิมพ์ทีละข้อความ
     """
     raw_lines = [l.strip() for l in user_text.splitlines() if l.strip()]
     lines = [re.sub(r'^[1-3][\.\:\)\s]+', '', l).strip() for l in raw_lines]
     
-    name = None
-    phone = None
-    tickets = None
-    
-    # 1. ค้นหาเบอร์โทรติดต่อ (มักขึ้นต้นด้วย 0)
+    found_name = None
+    found_phone = None
+    found_tickets = None
+
+    # 1. ค้นหาเบอร์โทรติดต่อ (ขึ้นต้นด้วย 0 และมี 9-10 หลัก)
     phone_match = re.search(r'(0\d{1,2}[-\s]?\d{3,4}[-\s]?\d{3,4}|0\d{8,9})', user_text)
     if phone_match:
-        phone = phone_match.group(1).replace('-', '').replace(' ', '').strip()
+        found_phone = phone_match.group(1).replace('-', '').replace(' ', '').strip()
 
     # 2. ค้นหาจำนวนบัตร
     ticket_match = re.search(r'(\d+)\s*(?:ใบ|ที่|คน|ท่าน|ticket|ตั๋ว)', user_text, re.I)
     if ticket_match:
-        tickets = int(ticket_match.group(1))
+        found_tickets = int(ticket_match.group(1))
     else:
         num_match = re.search(r'(?:จำนวน|บัตร|ที่ต้องการ)[^\d\n]*[:\-\s]*(\d+)', user_text)
         if num_match:
-            tickets = int(num_match.group(1))
+            found_tickets = int(num_match.group(1))
         elif len(lines) >= 3:
             third_line = lines[2]
             digits = re.findall(r'\d+', third_line)
             if digits:
-                tickets = int(digits[0])
+                found_tickets = int(digits[0])
+        elif len(lines) == 1 and re.match(r'^\d+$', lines[0]) and int(lines[0]) <= 50:
+            found_tickets = int(lines[0])
 
-    # 3. ค้นหาชื่อ-นามสกุล (กฎบรรทัดแรก)
+    # 3. ค้นหาชื่อ-นามสกุล
+    is_ticket_line = lambda t: bool(re.search(r'\d+\s*(?:ใบ|ที่|คน|ท่าน|ตั๋ว)', t, re.I) or re.search(r'(?:จำนวน|บัตร)[^\d\n]*[:\-\s]*\d+', t))
+    
     if len(lines) >= 1:
         first_line = lines[0]
-        cleaned_name = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', first_line).strip()
-        if not re.match(r'^0\d{8,9}$', cleaned_name.replace('-', '').replace(' ', '')):
-            if len(cleaned_name) >= 2:
-                name = cleaned_name
+        cleaned_first = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', first_line).strip()
+        # ไม่ใช่เบอร์โทร ไม่ใช่จำนวนบัตร และไม่ใช่ตัวเลขล้วน
+        if not re.match(r'^0\d{8,9}$', cleaned_first.replace('-', '').replace(' ', '')) and not re.match(r'^\d+$', cleaned_first) and not is_ticket_line(first_line):
+            if len(cleaned_first) >= 2:
+                found_name = cleaned_first
 
-    if not name:
+    if not found_name:
         for line in lines:
             cleaned = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', line).strip()
-            if phone and phone in line.replace('-', '').replace(' ', ''):
+            if found_phone and found_phone in line.replace('-', '').replace(' ', ''):
                 continue
-            if re.search(r'(?:จำนวน|ใบ|ที่|คน|ตั๋ว)', line) and re.search(r'\d+', line):
+            if is_ticket_line(line) or re.match(r'^\d+$', cleaned):
                 continue
             if len(cleaned) >= 2 and not re.match(r'^[0-9\s\.\-\:\(\)]+$', cleaned):
-                name = cleaned
+                found_name = cleaned
                 break
 
-    if not name and lines:
-        first_line = lines[0]
-        rem = re.sub(r'0\d{1,2}[-\s]?\d{3,4}[-\s]?\d{3,4}|0\d{8,9}', '', first_line)
-        rem = re.sub(r'\d+\s*(?:ใบ|ที่|คน|ท่าน|ตั๋ว)', '', rem)
-        rem = re.sub(r'^[1-3][\.\:\)\s]+', '', rem)
-        rem = re.sub(r'^(?:ขื่อ|ชื่อ)[\s\-_]*(?:นามสกุล|สกุล)?[\s:\-\.]*', '', rem).strip()
-        if len(rem) >= 2 and not re.match(r'^[0-9\s]+$', rem):
-            name = rem
-
-    final_name = name if (name and name != "คุณลูกค้า") else fallback_line_name
-    final_phone = phone if phone else "ตามที่แจ้งในแชท"
-    final_tickets = tickets if tickets and tickets > 0 else 1
-    total_price = final_tickets * TICKET_PRICE
-
-    is_booking_info = bool(phone or (name and name != "คุณลูกค้า") or ticket_match or (tickets and tickets > 1))
-
-    return {
-        "is_booking_info": is_booking_info,
-        "name": final_name,
-        "phone": final_phone,
-        "tickets": final_tickets,
-        "total_price": total_price
-    }
+    return found_name, found_phone, found_tickets
 
 def verify_slip_image(image_bytes, expected_amount=200):
     """
-    ระบบตรวจสอบสลิปโอนเงินตาม 3 เงื่อนไขชัดเจน (Bulletproof):
-    1. เลขบัญชีผู้รับ มีเลข 3156 ไหม (เช่น xxx-x-x3156-x หรือ 571-403156-3)
-    2. ชื่อบัญชีผู้รับ ใช่ 'นางสาว นภาพร นาควงศ์' หรือไม่
-    3. จำนวนเงินที่รับโอน ใช่จำนวนเดียวกับยอดชำระไหม
+    ระบบตรวจสอบสลิปโอนเงินตาม 2 เงื่อนไขเท่านั้น:
+    1. ตรวจสอบชื่อบัญชีปลายทางเป็น 'นางสาว นภาพร นาควงศ์' เท่านั้น
+    2. ตรวจสอบตัวเลขบนสลิปโอนเงินว่าตรงกับยอดชำระไหม
     """
     prompt = f"""
-คุณคือระบบตรวจสอบสลิปโอนเงิน โปรดตรวจสอบภาพสลิปนี้ตาม 3 ข้อดังนี้:
-1. บัญชีผู้รับเงิน: มีตัวเลข "3156" ปรากฏอยู่หรือไม่ (สลิปธนาคารมักเขียนเป็น xxx-x-x3156-x หรือ 571-403156-3)
-2. ชื่อผู้รับเงิน: มีชื่อ "นภาพร นาควงศ์" หรือ "นางสาว นภาพร นาควงศ์" หรือไม่
-3. จำนวนเงิน: โอนสำเร็จกี่บาท (ยอดชำระที่ตั้งไว้คือ {expected_amount} บาท)
+ตรวจวิเคราะห์สลิปการโอนเงินนี้ตาม 2 ข้อเท่านั้น:
+1. ชื่อบัญชีผู้รับเงิน (ปลายทาง): คือ "นางสาว นภาพร นาควงศ์" หรือ "นภาพร นาควงศ์" ใช่หรือไม่
+2. จำนวนเงินที่โอนสำเร็จ: ตัวเลขยอดเงินที่โอนบนสลิปคือเท่าไหร่ (ยอดชำระคือ {expected_amount} บาท)
 
-กรุณาตอบสั้นๆ 3 บรรทัดตามรูปแบบนี้เท่านั้น:
-ACCOUNT_3156: [YES หรือ NO]
-NAME_NAPHAPORN: [YES หรือ NO]
-AMOUNT: [ใส่เฉพาะตัวเลขยอดเงิน เช่น 200 หรือ 400 หรือ 2000]
+ตอบในรูปแบบ 2 บรรทัดนี้เท่านั้น (ห้ามใส่คำบรรยายอื่น):
+RECIPIENT_NAME_MATCH: [YES หรือ NO]
+TRANSFER_AMOUNT: [ระบุเฉพาะตัวเลข เช่น 200 หรือ 400 หรือ 2000]
 """
     try:
         pil_img = Image.open(io.BytesIO(image_bytes))
         res = vision_model.generate_content([prompt, pil_img])
         text_out = res.text.strip()
-        print("Gemini Vision Verification:\n", text_out)
+        print("Gemini Slip Verification Output:\n", text_out)
 
         text_upper = text_out.upper()
 
-        # 1. ตรวจสอบว่ามีเลข 3156 หรือไม่
-        has_3156 = "ACCOUNT_3156: YES" in text_upper or "3156" in text_out
+        # เงื่อนไขที่ 1: ตรวจสอบเฉพาะชื่อบัญชีผู้รับเป็น นภาพร นาควงศ์
+        name_match = (
+            "RECIPIENT_NAME_MATCH: YES" in text_upper
+            or "นภาพร" in text_out
+            or "นาควงศ์" in text_out
+        )
 
-        # 2. ตรวจสอบว่าชื่อผู้รับคือนภาพร นาควงศ์หรือไม่
-        has_name = "NAME_NAPHAPORN: YES" in text_upper or ("นภาพร" in text_out and "นาควงศ์" in text_out)
-
-        # 3. ดึงยอดเงินจากผลตรวจ
-        amt_match = re.search(r'(?:AMOUNT|ยอด|จำนวน)[^\d\n]*[:\s]*(\d+(?:\.\d+)?)', text_out, re.I)
+        # เงื่อนไขที่ 2: ตรวจสอบตัวเลขบนสลิปโอนเงิน
+        amt_match = re.search(r'(?:TRANSFER_AMOUNT|AMOUNT|ยอด|จำนวน)[^\d\n]*[:\s]*(\d+(?:\.\d+)?)', text_out, re.I)
         if not amt_match:
             amt_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:บาท|THB)', text_out, re.I)
-        
+
         slip_amount = float(amt_match.group(1)) if amt_match else float(expected_amount)
+        amount_match = (abs(slip_amount - expected_amount) < 1.0) or (slip_amount >= expected_amount and expected_amount > 0)
 
-        # ตรวจสอบยอดเงิน (ตรงกับยอดชำระ หรือโอนถูกต้องตามราคาบัตรใบละ 200)
-        amount_valid = (slip_amount >= 200.0)
-
-        # ผ่านครบ 3 เงื่อนไข
-        is_valid = bool(has_3156 and has_name and amount_valid)
+        is_passed = bool(name_match and amount_match)
 
         return {
-            "is_valid": is_valid,
-            "has_3156": has_3156,
-            "has_name": has_name,
-            "amount_valid": amount_valid,
-            "amount": slip_amount,
-            "raw": text_out
+            "is_passed": is_passed,
+            "name_match": name_match,
+            "amount_match": amount_match,
+            "slip_amount": slip_amount,
+            "raw_text": text_out
         }
     except Exception as e:
         print("Error verifying slip with Gemini:", e)
         return {
-            "is_valid": False,
-            "has_3156": False,
-            "has_name": False,
-            "amount_valid": False,
-            "amount": 0,
-            "raw": str(e)
+            "is_passed": False,
+            "name_match": False,
+            "amount_match": False,
+            "slip_amount": 0.0,
+            "raw_text": str(e)
         }
 
 # ==============================================================================
@@ -276,55 +250,76 @@ def handle_text_message(event):
     user_text = event.message.text.strip()
     session = user_sessions.get(user_id, {})
 
-    # ดึงชื่อ Display Name จาก LINE Profile
-    line_display_name = "คุณลูกค้า"
-    try:
-        with ApiClient(configuration) as api_client:
-            line_bot_api = MessagingApi(api_client)
-            profile = line_bot_api.get_profile(user_id)
-            if profile and profile.display_name:
-                line_display_name = profile.display_name
-    except Exception:
-        pass
-
-    # [ขั้นตอนที่ 1]: ตรวจสอบคีย์เวิร์ด "ซื้อบัตร" หรือเจตนาสั่งซื้อบัตร
+    # [ขั้นตอนที่ 1]: เริ่มต้นการจองเมื่อทัก "ซื้อบัตร", "จองบัตร"
     if any(kw in user_text for kw in ["ซื้อบัตร", "จองบัตร", "ราคาบัตร"]):
         user_sessions[user_id] = {
             "step": 1,
-            "name": line_display_name,
-            "phone": "",
-            "tickets": 1,
-            "total_price": TICKET_PRICE,
+            "name": None,
+            "phone": None,
+            "tickets": None,
+            "total_price": 0,
             "booked_at": datetime.now(THAI_TZ)
         }
         reply_text = get_step1_text()
         send_reply(event.reply_token, [TextMessage(text=reply_text)])
         return
 
-    # [ขั้นตอนที่ 2]: สกัดข้อมูลลูกค้าตามกฎ 3 บรรทัด (ชื่อ, เบอร์โทร, จำนวนบัตร x 200)
-    extracted = extract_customer_info(user_text, fallback_line_name=line_display_name)
-    
-    # หากลูกค้าอยู่ในขั้นตอนที่ 1 หรือส่งข้อมูลสั่งซื้อเข้ามา
-    if extracted.get("is_booking_info") or session.get("step") == 1:
-        name = extracted.get("name")
-        phone = extracted.get("phone")
-        tickets = extracted.get("tickets", 1)
-        total_price = extracted.get("total_price", tickets * TICKET_PRICE)
+    # [ขั้นตอนการกรอกรายละเอียด 3 ข้อ]:
+    # หากลูกค้าอยู่ในขั้นตอนการจอง (step 1) หรือกำลังส่งข้อมูลเข้ามา
+    if session.get("step") == 1 or session.get("step") == 2:
+        found_name, found_phone, found_tickets = extract_partial_booking_info(user_text)
 
-        # บันทึกข้อมูล Session
-        user_sessions[user_id] = {
-            "step": 2,
-            "name": name,
-            "phone": phone,
-            "tickets": tickets,
-            "total_price": total_price,
-            "booked_at": datetime.now(THAI_TZ)
-        }
+        # บันทึกสะสมข้อมูลที่ลูกค้าส่งมา
+        if found_name:
+            session["name"] = found_name
+        if found_phone:
+            session["phone"] = found_phone
+        if found_tickets:
+            session["tickets"] = found_tickets
 
-        # ตอบกลับด้วยข้อความสรุปยอดที่ขานชื่อ เบอร์ จำนวนใบ และราคารวม 200 x จำนวนบัตร
-        reply_text = get_step2_text(name, phone, tickets, total_price)
-        send_reply(event.reply_token, [TextMessage(text=reply_text)])
-        return
+        # ตรวจสอบว่าข้อมูลครบทั้ง 3 ข้อหรือยัง
+        missing = []
+        if not session.get("name"):
+            missing.append("ชื่อ - นามสกุล")
+        if not session.get("phone"):
+            missing.append("เบอร์ติดต่อ")
+        if not session.get("tickets"):
+            missing.append("จำนวนบัตรที่ต้องการ")
+
+        # กรณีที่ 1: ครบทั้ง 3 ข้อแล้ว -> ให้สรุปรายละเอียดการจอง (ขั้นตอนที่ 2)
+        if len(missing) == 0:
+            name = session["name"]
+            phone = session["phone"]
+            tickets = int(session["tickets"])
+            total_price = tickets * TICKET_PRICE
+
+            session["step"] = 2
+            session["total_price"] = total_price
+            user_sessions[user_id] = session
+
+            reply_text = get_step2_text(name, phone, tickets, total_price)
+            send_reply(event.reply_token, [TextMessage(text=reply_text)])
+            return
+
+        # กรณีที่ 2: ยังไม่ครบ 3 ข้อ -> รอทางลูกค้าตอบให้หมดก่อน และทวงถามข้อที่ขาด
+        else:
+            user_sessions[user_id] = session
+            if len(missing) == 3:
+                # ยังไม่มีข้อมูลเลย
+                reply_text = (
+                    "รบกวนแจ้งรายละเอียดการจองให้ครบทั้ง 3 ข้อดังนี้ด้วยนะคะ:\n"
+                    "1. ขื่อ - นามสกุล :\n"
+                    "2. เบอร์ติดต่อ :\n"
+                    "3. จำนวนบัตรที่ต้องการ :\n\n"
+                    "เมื่อแจ้งครบแล้ว แอดมินจะรีบสรุปยอดจองให้ทันทีค่ะ"
+                )
+            elif len(missing) == 2:
+                reply_text = f"ได้รับข้อมูลเรียบร้อยแล้วค่ะ รบกวนขอ {missing[0]} และ {missing[1]} เพิ่มเติมด้วยนะคะ เพื่อแอดมินจะได้สรุปยอดจองให้ค่ะ"
+            elif len(missing) == 1:
+                reply_text = f"ได้รับข้อมูลเรียบร้อยแล้วค่ะ รบกวนขอ {missing[0]} เพิ่มเติมอีกนิดนะคะ เพื่อแอดมินจะได้สรุปยอดจองให้ค่ะ"
+
+            send_reply(event.reply_token, [TextMessage(text=reply_text)])
+            return
 
     # กรณีถามคำถามทั่วไป (FAQ ของงาน Jabfest)
     try:
@@ -338,7 +333,7 @@ def handle_text_message(event):
     send_reply(event.reply_token, [TextMessage(text=reply_content)])
 
 # ------------------------------------------------------------------------------
-# 2. จัดการรูปภาพสลิปโอนเงิน (Image Message - ตรวจสลิปและยืนยันการจอง)
+# 2. จัดการรูปภาพสลิปโอนเงิน (Image Message - ตรวจสลิปตาม 2 เงื่อนไข)
 # ------------------------------------------------------------------------------
 @handler.add(MessageEvent, message=ImageMessageContent)
 def handle_image_message(event):
@@ -346,7 +341,6 @@ def handle_image_message(event):
     message_id = event.message.id
     session = user_sessions.get(user_id, {})
     
-    # ยอดชำระที่ตั้งไว้ใน Session (ถ้าไม่มีให้ตั้งเป็น 200)
     expected_amount = session.get("total_price", TICKET_PRICE)
     if not expected_amount or expected_amount <= 0:
         expected_amount = TICKET_PRICE
@@ -356,38 +350,51 @@ def handle_image_message(event):
         blob_api = MessagingApiBlob(api_client)
         image_bytes = blob_api.get_message_content(message_id)
 
-    # ส่งให้ Gemini Vision ตรวจสอบตาม 3 เงื่อนไข
+    # ส่งให้ Gemini Vision ตรวจสอบตาม 2 เงื่อนไข:
+    # 1. ชื่อบัญชีปลายทางเป็น 'นางสาว นภาพร นาควงศ์'
+    # 2. จำนวนเงินตรงกับยอดชำระ
     slip_result = verify_slip_image(image_bytes, expected_amount=expected_amount)
     
-    has_3156 = slip_result.get("has_3156", False)
-    has_name = slip_result.get("has_name", False)
-    amount_valid = slip_result.get("amount_valid", False)
-    slip_amount = slip_result.get("amount", expected_amount)
+    is_passed = slip_result.get("is_passed", False)
+    name_match = slip_result.get("name_match", False)
+    amount_match = slip_result.get("amount_match", False)
+    slip_amount = slip_result.get("slip_amount", expected_amount)
 
-    # หากผ่านเงื่อนไข (มีเลข 3156 และมีชื่อ นภาพร นาควงศ์)
-    if (has_3156 and has_name) or slip_result.get("is_valid", False):
-        # คำนวณจำนวนบัตรตามยอดที่โอนจริง (เช่น 200 = 1 ใบ, 400 = 2 ใบ, 2000 = 10 ใบ)
+    # หากผ่าน 2 ข้อนี้ ให้ผ่านไปตอบขั้นตอนที่ 3 ได้เลยทันที
+    if is_passed or (name_match and (slip_amount >= 200.0)):
         actual_amount = slip_amount if slip_amount and slip_amount > 0 else expected_amount
-        tickets = max(1, int(round(actual_amount / TICKET_PRICE)))
+        tickets = session.get("tickets") or max(1, int(round(actual_amount / TICKET_PRICE)))
 
         name = session.get("name") or "คุณลูกค้า"
         phone = session.get("phone") or ""
 
+        # [ขั้นตอนที่ 3]: ข้อความยืนยันการจอง + สติกเกอร์ขอบคุณ
         reply_text = get_step3_text(name, phone, tickets, int(actual_amount))
         sticker_msg = StickerMessage(package_id="446", sticker_id="1988")
         user_sessions[user_id]["step"] = 3
         send_reply(event.reply_token, [TextMessage(text=reply_text), sticker_msg])
 
     else:
-        # กรณีบัญชีผู้รับไม่ถูกต้อง
-        err_msg = (
-            "ขออภัยค่ะ แอดมินตรวจสอบสลิปแล้วข้อมูลบัญชีผู้รับไม่ถูกต้อง หรือภาพสลิปไม่ชัดเจนค่ะ\n\n"
-            "รบกวนตรวจสอบการโอนเข้าบัญชี:\n"
-            "ธนาคารไทยพาณิชย์ (SCB)\n"
-            "เลขบัญชี: 571-403156-3\n"
-            "ชื่อบัญชี: นางสาว นภาพร นาควงศ์\n\n"
-            "หากโอนถูกต้องเรียบร้อยแล้ว สามารถส่งภาพสลิปใหม่อีกครั้งได้เลยนะคะ"
-        )
+        # กรณีไม่ผ่าน: แจ้งเหตุผลให้ลูกค้าทราบอย่างชัดเจน
+        if not name_match:
+            err_msg = (
+                "ขออภัยค่ะ แอดมินตรวจสอบสลิปแล้ว ชื่อบัญชีผู้รับปลายทางไม่ใช่ 'นางสาว นภาพร นาควงศ์' ค่ะ\n\n"
+                "รบกวนตรวจสอบการโอนเข้าบัญชี:\n"
+                "ธนาคารไทยพาณิชย์ (SCB)\n"
+                "เลขบัญชี: 571-403156-3\n"
+                "ชื่อบัญชี: นางสาว นภาพร นาควงศ์\n\n"
+                "หากโอนถูกต้องเรียบร้อยแล้ว สามารถส่งภาพสลิปที่ถูกต้องอีกครั้งได้เลยนะคะ"
+            )
+        elif not amount_match:
+            err_msg = (
+                f"ขออภัยค่ะ ยอดเงินในสลิป ({slip_amount:,.2f} บาท) ไม่ตรงกับยอดชำระ ({expected_amount:,.2f} บาท) ค่ะ\n\n"
+                "รบกวนตรวจสอบยอดเงินและส่งสลิปหลักฐานการโอนที่ถูกต้องอีกครั้งนะคะ"
+            )
+        else:
+            err_msg = (
+                "ขออภัยค่ะ แอดมินไม่สามารถอ่านข้อมูลบนภาพสลิปได้ชัดเจน\n"
+                "รบกวนถ่ายหรือส่งภาพสลิปการโอนเงินที่ชัดเจนอีกครั้งนะคะ"
+            )
         send_reply(event.reply_token, [TextMessage(text=err_msg)])
 
 def send_reply(reply_token, messages):
